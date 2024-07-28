@@ -13,5 +13,7 @@ func main() {
 	// defer db.Disconnect()
 
 	// Start the web crawler
-	crawler.StartCrawler(nil)
+	go crawler.StartCrawler("WikiContent")
+
+	select {}
 }

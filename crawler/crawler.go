@@ -3,14 +3,10 @@ package crawler
 import (
 	"fmt"
 	"math/rand"
-	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/gocolly/colly"
-	"github.com/khailequang334/web_crawler/database"
 )
 
 var userAgents = []string{
@@ -26,48 +22,28 @@ func RandomUserAgent() string {
 	return userAgents[rand.Intn(len(userAgents))]
 }
 
-var count = 1
-
-func ScrapeContent(content string) {
-	// fmt.Println("Content:", content)
-	filename := "file_" + strconv.Itoa(count) + ".txt"
-	err := os.WriteFile(filename, []byte(content), 0644)
-	if err != nil {
-		panic(err)
-	}
-	count++
-}
-
-func DiscoverUrl(url string, domain string) []string {
+func DiscoverUrl(url string, rule CrawlerRule) []string {
 	collectedUrls := []string{}
 	c := colly.NewCollector(
 		colly.UserAgent(RandomUserAgent()),
-		colly.AllowedDomains(domain),
+		colly.AllowedDomains(rule.Domain),
 	)
+
 	c.SetRequestTimeout(100 * time.Second)
 
 	// Detect new urls
-	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		link := e.Attr("href")
-		absoluteURL := e.Request.AbsoluteURL(link)
-		if strings.HasPrefix(absoluteURL, "https://"+domain) {
-			fmt.Println("Content:", absoluteURL)
-			collectedUrls = append(collectedUrls, absoluteURL)
-		}
-	})
+	for _, collector := range rule.LinkCollectors {
+		c.OnHTML(collector.Selector, func(h *colly.HTMLElement) {
+			collectedUrls = append(collectedUrls, collector.Callback(h))
+		})
+	}
 
 	// Scrape content
-	c.OnHTML("div.mw-parser-output > p", func(e *colly.HTMLElement) {
-		ScrapeContent(e.Text)
-	})
+	for _, parser := range rule.ContentParsers {
+		c.OnHTML(parser.Selector, parser.Callback)
+	}
 
-	c.OnRequest(func(r *colly.Request) {
-		time.Sleep(2 * time.Second)
-	})
-
-	// c.OnResponse(func(r *colly.Response) {
-	// 	fmt.Println("Got a response from", r.Request.URL)
-	// })
+	c.OnRequest(func(r *colly.Request) {})
 
 	c.OnError(func(r *colly.Response, e error) {
 		fmt.Println("Got error:", e)
@@ -75,31 +51,25 @@ func DiscoverUrl(url string, domain string) []string {
 
 	c.Visit(url)
 
+	time.Sleep(500 * time.Millisecond)
+
 	return collectedUrls
 }
 
-func Worker(url string, domain string, workData chan<- []string, db *database.MongoDB) {
-	collectedUrls := DiscoverUrl(url, domain)
+func StartCrawler(ruleType string) {
+	rule, exists := CrawlerRules[ruleType]
+	if !exists {
+		fmt.Printf("Crawler rule type %s not found!\n", ruleType)
+		return
+	}
 
-	workData <- collectedUrls
-
-}
-
-func StartCrawler(db *database.MongoDB) {
 	workData := make(chan []string, 100) // Buffered channel
 	var wg sync.WaitGroup
 
 	visitedUrls := make(map[string]bool)
 
-	domain := "en.wikipedia.org"
-	baseUrls := []string{
-		"https://en.wikipedia.org/wiki/FIFA_World_Cup",
-	}
-
 	// Add base urls to channel
-	go func() {
-		workData <- baseUrls
-	}()
+	workData <- rule.BaseUrls
 
 	for urls := range workData {
 		for _, url := range urls {
@@ -108,12 +78,15 @@ func StartCrawler(db *database.MongoDB) {
 				wg.Add(1)
 				go func(url string) {
 					defer wg.Done()
-					Worker(url, domain, workData, db)
+					workData <- DiscoverUrl(url, rule)
 				}(url)
 			}
 		}
 	}
 
 	// Wait for all remaining workers to finish
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		close(workData)
+	}()
 }
